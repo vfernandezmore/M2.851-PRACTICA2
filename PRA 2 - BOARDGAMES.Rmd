@@ -1,0 +1,292 @@
+---
+title: "PRA 2 - Tipología y ciclo de vida de los datos"
+output: pdf_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(data.table)
+library(tidyverse)
+library(corrplot)
+library(factoextra)
+library(MASS)
+library(nortest)
+```
+
+# Introducción
+
+Debido a que los datos que extrjimos meidante *Web Scrapping* no son los más adecuados para realizar una regresión, es por esllo que hemos decidido utilizar una muestra de *Kaggle*, más concretamente, [Board Games](https://www.kaggle.com/datasets/andrewmvd/board-games?resource=download), este conjunto de datos contiene la información de los juegos de mesa de la web [BoardGameGeek](https://boardgamegeek.com/) a fecha de enero de 2021.
+
+Presentamos los primeros cinco registros de nuestra muestra.
+
+```{r}
+dt <- read.csv2('bgg_dataset.csv', sep = ';') %>% data.table()
+head(dt, 5)
+```
+
+# Descripción del dataset
+
+Las variables que tenemos en nuestro conjunto de datos son las siguientes
+
+-   **ID**: Identificación del juego.
+-   **Name**: Nombre del juego.
+-   **Year.Published**: Año de publicación.
+-   **Min.Players**: Número mínimo de jugadores.
+-   **Max.Players**: Número máximo de jugadores.
+-   **Play.Time**: Duración estimada de cada partida.
+-   **Min.Age**: Edad mínima recomendada para el juego.
+-   **Users.Rated**: Número de usarios que han valorado el juego.
+-   **Rating.Average**: Media de la puntuación otorgada por los usuarios.
+-   **BGG.Rank**: Ranking del juego respecto al resto.
+-   **Complexity.Average**: Complejidad o dificultad del juego, valoración media realizada por los usuarios.
+-   **Owned.Users**: Cantidad de usuarios que afirman tener el juego.
+-   **Mechanics**: Campo con múltiples valores, cada valor indica una mecánica del juego (lanzar dados, robar cartas, por turnos, etc.).
+-   **Domains**: Género del juego, campo con hasta 2 valores simultáneamente (Familiar, Estrategia, Infantil, etc.).
+
+Explotar estos datos puede tener como objetivo aumentar los beneficios de una tienda de juegos de mesa, por lo que algunas de las principales preguntas a las que se buscará respuesta son
+
+-   *¿Qué tipo de juegos son los que más se venden?*
+-   *¿Las valoraciones positivas influyen en el número de ventas?*
+-   *¿La duración de las partidas afecta a las ventas?*
+-   *¿Es posible estimar las ventas que tendrá un juego de mesa a partir de los datos que disponemos?*
+
+Estas son algunas de las preguntas que nos han surgido, a lo largo de esta práctica intentaremos dar una respuesta a estas preguntas y a otras que puedan surgir.
+
+# Integración y selección de los datos de interés a analizar
+
+A continuación mostramos como se distribuyen los datos que tenemos
+
+```{r}
+summary(dt)
+```
+
+De esta manera tenemos una breve idea de como son los datos que disponemos. También nos sirve para decidir si descartmos previamente alguna variable que no vaya a aportarnos ninguna información, como es el caso de las variables *ID*, *Name* y *BGG.Rank* las cuales no aportan información relevante a nuestros. También descartamos la variable *Mechanics* ya que requiere de un tratamiento especial si queremos aprovecharla.
+
+```{r, warning=FALSE}
+dt <- dt %>% dplyr::select(-c(ID, Name, BGG.Rank, Mechanics))
+```
+
+# Limpieza de los datos
+
+Ahora que ya disponemos de un conjunto de datos inicial, el cual tendremos que explotar, necesitaremos limpiarlo ya que esto nos permitirá obtener mejores resultados posteriormente.
+
+## Tratamiento de los vacíos
+
+Comenzaremos identificando los registros que contienen vacíos
+
+```{r}
+apply(dt, 2, function(x){round((sum(is.na(x))/length(x))*100, 2)})
+```
+
+Como se puede apreciar la variable *Owned.Users* contiene un 0.11% de registros vacíos, debido a que esta cantidad es insignificate optaremos por prescindir de estos registros y por tanto los eliminaremos
+
+```{r}
+dt <- dt %>% filter(!is.na(Owned.Users))
+```
+
+Buscaremos ahora vacíos en los datos que no se expresen como *NA*.
+
+```{r}
+apply(dt, 2, function(x){round((sum(x=='')/length(x))*100, 2)})
+```
+
+Debido a que en esta ocasión encontramos una cantidad de registros vacíos en la varible *Domains* optamos en esta ocasión por asignar un valor a dichos valores vacíos.
+
+```{r}
+dt[Domains == '', Domains := 'Other']
+```
+
+Al asignar el valor *Other* a nuestras variables, tenemos que dichas variables ahora cuentan con una categoría nueva, la cual nos permite identificar los registros de los cuales no teniamos información en un principio.
+
+Después de esta transformación es muy poco probable que las variables de tipo categórico sufran más modificaciones, por lo que sería de gran utilidad transformarlas a tipo factor, ya que será algo que necesitemos más adelante
+
+```{r}
+
+dt <- dt %>% separate_rows(Domains, sep = ', ') %>% data.table()
+dt <- dt %>% 
+  mutate(Domains = as.factor(Domains))
+```
+
+## Tratamiento de outlayers
+
+A continuación realizaremos un tratamiento para los distintos valores extremos que encontremos en nuestras varibles, es por ello que tenemos que identificar en nuestras variables númericas este tipo de valores.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+ggplot(dt, aes(y = Year.Published)) + geom_boxplot()
+ggplot(dt, aes(y = Min.Players)) + geom_boxplot()
+ggplot(dt, aes(y = Max.Players)) + geom_boxplot()
+ggplot(dt, aes(y = Play.Time)) + geom_boxplot()
+ggplot(dt, aes(y = Min.Age)) + geom_boxplot()
+ggplot(dt, aes(y = Users.Rated)) + geom_boxplot()
+ggplot(dt, aes(y = Rating.Average)) + geom_boxplot()
+ggplot(dt, aes(y = Complexity.Average)) + geom_boxplot()
+ggplot(dt, aes(y = Owned.Users)) + geom_boxplot()
+```
+
+Como se puede apreciar en todas las gráficas se presentan registros con valores extremos, por lo que decidimos acotar estos valores. Cabe destacar, que algunas de las variables no serán acotadas ya que por lo que significan no parece tener demasiado sentido hacerlo, una de ellas es *Rating.Average*.
+
+```{r, warning=FALSE}
+dt[Year.Published < as.integer(IQR(dt[, Year.Published])*(-1.5) + 
+  quantile(dt[, Year.Published], probs = 0.25)),
+  Year.Published := as.integer(IQR(dt[, Year.Published])*(-1.5) + 
+  quantile(dt[, Year.Published], probs = 0.25))]
+
+dt[Max.Players > IQR(dt[, Max.Players])*1.5 + 
+  quantile(dt[, Max.Players], probs = 0.75),
+  Max.Players := IQR(dt[, Max.Players])*1.5 + 
+  quantile(dt[, Max.Players], probs = 0.75)]
+
+dt[Play.Time > IQR(dt[, Play.Time])*1.5 + 
+  quantile(dt[, Play.Time], probs = 0.75),
+  Play.Time := IQR(dt[, Play.Time])*1.5 + 
+  quantile(dt[, Play.Time], probs = 0.75)]
+
+dt[Users.Rated > IQR(dt[, Users.Rated])*1.5 + 
+  quantile(dt[, Users.Rated], probs = 0.75),
+  Users.Rated := IQR(dt[, Users.Rated])*1.5 + 
+  quantile(dt[, Users.Rated], probs = 0.75)]
+
+dt[Owned.Users > IQR(dt[, Owned.Users])*1.5 + 
+  quantile(dt[, Owned.Users], probs = 0.75),
+  Owned.Users := IQR(dt[, Owned.Users])*1.5 + 
+  quantile(dt[, Owned.Users], probs = 0.75)]
+
+```
+
+# Análisis de los datos
+
+## Comparación de las variables
+
+Ahora mostraremos algunas gráficas las cuales pueden ayudarnos a entender mejor nuestros datos, llegando incluso a dar respuesta a alguna de las preguntas que hemos presentado al principio de la práctica.
+
+Comenzaremos mostrando una gráfica que compara
+
+```{r}
+
+dtPlot <- dt[, .(Domains, Owned.Users)] %>% 
+  group_by(Domains) %>% 
+  summarise(Mean.Owned.Users = mean(Owned.Users))
+
+ggplot(data=dtPlot, aes(x=Domains, y=Mean.Owned.Users, fill = Domains)) + 
+    geom_bar(stat="identity", position="stack") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Como se puede apreciar algunos géneros son más populares que otros, estos son los juegos familiares, los de fiesta, los de estrategía y los temáticos, con este resultado puede darse respuesta a la primera de las preguntas que hemos planteado, es decir, existen algunos tipos de juegos que se venden mejor que otros, y estos son los mencionados anteriormente.
+
+Ahora la intención es comparar la variable de la media de puntuación con el total de ventas, de esta manera podremos ver si la puntuación influye en el número de ventas.
+
+```{r, warning=FALSE}
+dtPlot <- dt %>% data.table() %>% mutate(Rating.Average.2 = ceiling(Rating.Average))
+
+dtPlot <- dtPlot[, .(Rating.Average.2, Owned.Users)] %>% 
+  group_by(Rating.Average.2) %>% 
+  summarise(Mean.Owned.Users = mean(Owned.Users))
+
+ggplot(data=dtPlot, aes(x=Rating.Average.2, y=Mean.Owned.Users, fill = Rating.Average.2)) + 
+    geom_bar(stat="identity", position="stack") +
+  guides(fill=guide_legend(title="Rating.Average")) +
+  scale_x_discrete(name ="Rating.Average", limits=c(2:10))
+
+```
+
+Como se puede apreciar, la puntuación de cada juego no influye en el número de ventas, ya que los juegos con una puntuación de 10 no son más vendidos que los juegos que tienen notas más bajas.
+
+## Regresión
+
+El objetivo de este apartado es desarrollar un modelo de regresión lineal el cual pueda aproximoar la cantidad de ventas de un juego de mesa cualquiera. Antes de crear el modelo, veremos que variables estan correlacionadas entre si, ya que no nos interesa que estas formen parte de las variables que entren al modelo
+
+```{r}
+cm <- cor(dt %>% dplyr::select(where(is.numeric)))
+corrplot(cm, method = "ellipse")
+```
+
+De manera general se puede apreciar que la mayoria de las variables no presentan correlación, con la excepción de *Complexity.Average*, la cual esta relacionada de manera proporcional con la variable *Play.Time* e inversamente proporcional con la variable *Max.Players*, es por eso que tomamos la decisión de excluir la variable de la complejidad de los datos que disponemos.
+
+```{r}
+dt <- dt %>% dplyr::select(-Complexity.Average)
+```
+
+Ahora que disponemos de variables que no estan correlacionadas entre si, veremos a partir del PCA cual es la cantidad de variables que necesitamos para tener una explicabilidad lo suficientemente alta como para dar por válido el modelo
+
+```{r}
+par(mfrow = c(1, 2))
+
+res.pca <- prcomp(dt %>% dplyr::select(where(is.numeric)), scale = T)
+fviz_eig(res.pca, addlabels = T)
+fviz_pca_var(res.pca, axes =c(1,2), repel = T)
+```
+
+Podemos ver que con 6 o 7 variables obtendremos un modelo con una alta explicabilidad. Aún así, vamos a aplicar el método de selección de variables de Akaike, para ello creamos un modelo en el cual no se ha descartado ninguna variable
+
+```{r}
+modelo <- lm(Owned.Users ~., data = dt)
+summary(modelo)
+```
+
+```{r}
+stepAIC(modelo,direction = c("backward"))
+```
+
+Este método nos devuelve la siguiente formula *Owned.Users \~ Year.Published + Min.Players + Max.Players + Play.Time + Min.Age + Users.Rated + Domains*, la cual pasará a ser la que usemos en nuestro modelo final. Por tanto, definimos nuestro nuevo modelo a partir de dicha formula
+
+```{r}
+modeloFinal <- lm(formula = Owned.Users ~ Year.Published + Min.Players + Max.Players + 
+    Play.Time + Min.Age + Users.Rated + Domains, data = dt)
+
+summary(modeloFinal)
+```
+
+En este modelo se ha decidido prescindir de la variable *Rating.Average*, y además para la variable *Domains* se han construido variables dummy las cuales permiten considerar todas las categorías que esta variable tiene.
+
+Por otro lado, se puede apreciar que obtenemos un R-squared bastante próximo a 1, siendo este de 0.9394, lo que es un buen indicativo de que el modelo funcionará de manera adecuada.
+
+## Normalidad y homocedasticidad
+
+Ahora nos tocará verificar que nuestro modelo cumple las condiciones de normalidad y de igualdad de varianzaas. Para ello usaremos distintos test estadísticos.
+
+```{r}
+lillie.test(modeloFinal$residuals)
+ad.test(modeloFinal$residuals)
+pearson.test(modeloFinal$residuals)
+cvm.test(modeloFinal$residuals)
+```
+
+Comprobemos hora la homocedasticidad mediante los test de Levene y el test de Fligner-Killeen
+
+```{r}
+car::leveneTest(y = dt$Owned.Users, group = dt$Domains, center = "median")
+fligner.test(Owned.Users ~ Rating.Average, data = dt)
+fligner.test(Owned.Users ~ Min.Players, data = dt)
+fligner.test(Owned.Users ~ Max.Players, data = dt)
+fligner.test(Owned.Users ~ Play.Time, data = dt)
+```
+
+Lamentablemente nuestro modelo no cumple ni la condición de normalidad ni la de homocedasticidad, por lo que se puede considerar aplicar las transformaciones de Box-Cox y construir nuevamente el modelo, otra opción sería, no realizar ninguna transformación pero hacer uso de otro tipo de modelo.
+
+# Conslusión
+
+Algunas de las cuestiones de las que se plantearon inicialmente y que quedan por responder son las siguientes
+
+*¿La duración de las partidas afecta a las ventas?*
+
+Esta pregunta se podría responder mostrando un gráfico con los datos que tenemos, pero también se puede hacer teniendo en cuenta el modelo que hemos construido, en él, se puede apreciar que la variable *Play.Time* entra al modelo y tiene un peso de 0.372, esto se puede interpretar como que efectivamente, el tiempo de las partidas influye en las ventas de un juego mesa de la forma que a mayor tiempo medio de las partidas mayores serán las ventas.
+
+*¿Es posible estimar las ventas que tendrá un juego de mesa a partir de los datos que disponemos?*
+
+Tal y como hemos hecho anteriormente, solo habrá que tratar los datos que tenemos y desarrollar un modelo el cual estime el número de ventas. En esta práctica hemos optado por una regresión lineal, pero se podrían haber aplicado técnicas más complejas para el desarrollo del modelo.
+
+# Otras cuestiones
+
+También se pueden plantear cuestiones más a largo plazo, como podrían ser preguntas sobre como van a evolucionar ciertas variables a lo largo del tiempo, es decir, no solo predecir si las ventas aumentarán en los próximos años, si no que también ser capaces de identificar las tendencias de los tipos de juegos que habrá en los años venideros, es por este motivo que es de gran importancia tener un visión global de negocio.
+
+## Contribuciones
+
+| Contribuciones              | Firma                                            |
+|-----------------------------|--------------------------------------------------|
+| Investigación previa        | Jorge Ramón Díaz Suarez, Víctor Fernández Moreno |
+| Redacción de las respuestas | Jorge Ramón Díaz Suarez, Víctor Fernández Moreno |
+| Desarrollo del código       | Jorge Ramón Díaz Suarez, Víctor Fernández Moreno |
+| Participación en el vídeo   | Jorge Ramón Díaz Suarez, Víctor Fernández Moreno |
